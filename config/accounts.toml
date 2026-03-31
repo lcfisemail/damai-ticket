@@ -1,0 +1,5 @@
+# 多账号配置示例
+# [[accounts]]
+# nickname = "账号1"
+# cookie_string = ""  # 从浏览器DevTools复制的Cookie字符串
+# proxy = ""          # 可选，该账号专用代理

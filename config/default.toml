@@ -1,0 +1,40 @@
+[general]
+log_level = "DEBUG"
+data_dir = "./data"
+
+[target]
+event_url = ""
+sessions = []          # 空=任意场次
+tiers = []             # 按优先级排序；空=最便宜
+ticket_count = 1
+buyers = []            # 观演人ID列表
+
+[timing]
+poll_interval_min = 0.5
+poll_interval_max = 2.0
+sale_start_time = ""   # ISO 8601格式，如 "2025-01-01T20:00:00+08:00"
+order_retry_max = 10
+order_retry_backoff_base = 0.1
+
+[proxy]
+enabled = false
+proxies = []
+pin_per_account = true
+
+[notification]
+[notification.wechat]
+enabled = false
+webhook_url = ""
+
+[notification.dingtalk]
+enabled = false
+webhook_url = ""
+secret = ""
+
+[notification.email]
+enabled = false
+smtp_host = ""
+smtp_port = 465
+username = ""
+password = ""
+to_addresses = []
