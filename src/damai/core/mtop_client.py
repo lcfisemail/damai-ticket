@@ -87,15 +87,26 @@ class MtopClient:
 
     def _get_token(self) -> str:
         """从 httpx cookie jar 中提取 mTOP token"""
-        # httpx.Cookies.get() only accepts (name, default); domain filtering
-        # is done by iterating the underlying jar when needed.
-        h5tk = self._session.cookies.get("_m_h5_tk")
+        h5tk = ""
+        try:
+            h5tk = self._session.cookies.get("_m_h5_tk") or ""
+        except Exception:
+            h5tk = ""
+
         if not h5tk:
-            # Fallback: scan all cookies for the key across domains
+            preferred_domains = ("damai.cn", "m.damai.cn")
+            fallback_value = ""
             for cookie in self._session.cookies.jar:
-                if cookie.name == "_m_h5_tk":
+                if cookie.name != "_m_h5_tk":
+                    continue
+                cookie_domain = (cookie.domain or "").lstrip(".")
+                if cookie_domain.endswith(preferred_domains):
                     h5tk = cookie.value
                     break
+                if not fallback_value:
+                    fallback_value = cookie.value
+            if not h5tk:
+                h5tk = fallback_value
         if h5tk:
             return extract_token_from_h5tk(h5tk)
         return ""

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Slot
+from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -22,21 +22,21 @@ from damai.gui.widgets.login_tab import LoginTab
 from damai.gui.widgets.qr_login_dialog import QrLoginDialog
 from damai.gui.widgets.settings_tab import SettingsTab
 from damai.gui.widgets.task_tab import TaskTab
-from damai.gui.workers import LoginWorker, TicketWorker
+from damai.gui.workers import EventLoaderWorker, LoginWorker, TicketWorker
 
 
 class CaptchaDialog(QDialog):
-    """验证码手动解决对话框。"""
+    """验证码手动输入对话框。"""
 
     def __init__(self, challenge_data: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("请完成验证码")
+        self.setWindowTitle("手动输入验证码")
         self.setModal(True)
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "大麦网触发了滑动验证码。\n"
-                "请在浏览器中完成验证后，将 nc_token 粘贴到下方:"
+                "请在浏览器中完成验证码。\n"
+                "完成后，将 nc_token 粘贴到下方："
             )
         )
         self._token_input = QTextEdit()
@@ -54,21 +54,25 @@ class CaptchaDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    """大麦抢票工具主窗口。"""
+    """大麦抢票辅助主窗口。"""
+
+    log_received = Signal(str, str)
 
     def __init__(self, data_dir: Path):
         super().__init__()
         self._data_dir = data_dir
         self._ticket_worker: TicketWorker | None = None
         self._login_worker: LoginWorker | None = None
+        self._event_loader_worker: EventLoaderWorker | None = None
         self._accounts_config: list = []
         self._setup_ui()
         self._setup_loguru_sink()
+        self.log_received.connect(self._append_logs)
 
     def _setup_ui(self):
-        self.setWindowTitle("大麦网抢票工具 v0.1")
+        self.setWindowTitle("大麦抢票助手 v0.1")
         self.setMinimumSize(800, 600)
-        self.resize(900, 700)
+        self.resize(900, 760)
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
@@ -90,13 +94,12 @@ class MainWindow(QMainWindow):
         self._login_tab.remove_requested.connect(self._on_remove_requested)
         self._task_tab.start_requested.connect(self._on_start_requested)
         self._task_tab.stop_requested.connect(self._on_stop_requested)
+        self._task_tab.detail_load_requested.connect(self._on_detail_load_requested)
 
     def _setup_loguru_sink(self):
         def gui_sink(message):
             record = message.record
-            level = record["level"].name
-            text = record["message"]
-            self._log_tab.append_log(level, text)
+            self.log_received.emit(record["level"].name, record["message"])
 
         logger.add(gui_sink, format="{message}")
 
@@ -132,7 +135,7 @@ class MainWindow(QMainWindow):
         cookie_string = dialog.get_cookie_string().strip()
         if not cookie_string:
             self._login_tab.reset_login_state()
-            QMessageBox.warning(self, "提示", "未从扫码登录页获取到 Cookie")
+            QMessageBox.warning(self, "提示", "未从扫码登录页面提取到 Cookie")
             return
 
         self.statusBar().showMessage(f"正在导入账号 {nickname} 的扫码登录态...")
@@ -182,10 +185,47 @@ class MainWindow(QMainWindow):
         ]
         self.statusBar().showMessage(f"已移除账号 {nickname}")
 
+    @Slot(str, str)
+    def _append_logs(self, level: str, text: str):
+        self._log_tab.append_log(level, text)
+        self._task_tab.append_log(level, text)
+
+    @Slot(str)
+    def _on_detail_load_requested(self, event_url: str):
+        if self._event_loader_worker and self._event_loader_worker.isRunning():
+            return
+
+        self._task_tab.set_loading(True)
+        self._task_tab.update_status("正在加载演出信息...")
+        self._event_loader_worker = EventLoaderWorker(
+            event_url=event_url,
+            accounts_config=self._accounts_config,
+            data_dir=self._data_dir,
+        )
+        self._event_loader_worker.status_update.connect(self._on_status_update)
+        self._event_loader_worker.load_success.connect(self._on_detail_loaded)
+        self._event_loader_worker.load_failed.connect(self._on_detail_load_failed)
+        self._event_loader_worker.finished.connect(lambda: self._task_tab.set_loading(False))
+        self._event_loader_worker.start()
+
+    @Slot(dict)
+    def _on_detail_loaded(self, detail: dict):
+        self._task_tab.set_event_detail(detail)
+        self._on_status_update("演出信息加载完成")
+        logger.success(
+            f"已加载演出信息: {detail.get('title', '')}，共 {detail.get('tier_count', 0)} 个票档"
+        )
+
+    @Slot(str)
+    def _on_detail_load_failed(self, error: str):
+        self._on_status_update("演出信息加载失败")
+        logger.error(f"演出信息加载失败: {error}")
+        QMessageBox.warning(self, "加载失败", error)
+
     @Slot(dict)
     def _on_start_requested(self, config: dict):
         if not self._accounts_config:
-            QMessageBox.warning(self, "提示", "请先在「登录」标签页添加账号")
+            QMessageBox.warning(self, "提示", "请先在登录标签页登录账号")
             return
 
         if self._ticket_worker and self._ticket_worker.isRunning():
@@ -221,15 +261,16 @@ class MainWindow(QMainWindow):
     def _on_status_update(self, message: str):
         self._task_tab.update_status(message)
         self.statusBar().showMessage(message)
+        self._task_tab.append_log("INFO", message)
 
     @Slot(dict)
     def _on_order_success(self, result: dict):
         order_id = result.get("order_id", "")
-        logger.success(f"抢票成功！订单号: {order_id}")
+        logger.success(f"抢票成功，订单号: {order_id}")
         QMessageBox.information(
             self,
-            "抢票成功！",
-            f"订单号: {order_id}\n\n请尽快前往大麦网完成支付！",
+            "抢票成功",
+            f"订单号: {order_id}\n\n请尽快前往大麦完成支付。",
         )
         self._task_tab.set_running(False)
 
@@ -252,6 +293,8 @@ class MainWindow(QMainWindow):
             self._on_stop_requested()
 
     def closeEvent(self, event):
+        if self._event_loader_worker and self._event_loader_worker.isRunning():
+            self._event_loader_worker.wait(1000)
         if self._ticket_worker and self._ticket_worker.isRunning():
             self._ticket_worker.stop()
             self._ticket_worker.wait(2000)

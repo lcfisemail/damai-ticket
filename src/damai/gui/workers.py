@@ -1,8 +1,8 @@
 """
-QThread <-> asyncio 桥接
+QThread <-> asyncio 桥接。
 
-所有异步网络操作（登录、监控、下单）运行在独立的 QThread 中的 asyncio 事件循环里。
-与 GUI 线程的通信完全通过 Qt Signal/Slot 机制，绝不直接跨线程调用方法。
+将异步登录、演出详情加载、抢票流程放到独立的 QThread 事件循环中执行，
+避免阻塞 GUI 主线程。
 """
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from PySide6.QtCore import QObject, QThread, Signal
 from damai.core.account import AccountConfig, AccountPool
 from damai.core.auth import AuthManager
 from damai.core.captcha import CaptchaChallenge, CaptchaSolution, ManualCaptchaHandler
+from damai.core.detail import fetch_event_detail
 from damai.core.monitor import SessionWarmup, TicketMonitor, extract_item_id
+from damai.core.mtop_client import MtopClient
 from damai.core.order import BuyerInfo
 from damai.utils.time_sync import parse_sale_start_time, sleep_until, sync_time
 
@@ -71,10 +73,67 @@ class LoginWorker(QThread):
             self.login_failed.emit(str(error))
 
 
+class EventLoaderWorker(QThread):
+    """演出详情加载线程。"""
+
+    status_update = Signal(str)
+    load_success = Signal(dict)
+    load_failed = Signal(str)
+
+    def __init__(
+        self,
+        event_url: str,
+        accounts_config: list,
+        data_dir: Path,
+        parent: Optional[QObject] = None,
+    ):
+        super().__init__(parent)
+        self._event_url = event_url
+        self._accounts_config = accounts_config
+        self._data_dir = data_dir
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._load())
+        except Exception as error:
+            self.load_failed.emit(str(error))
+        finally:
+            loop.close()
+
+    async def _load(self):
+        item_id = extract_item_id(self._event_url)
+        if not item_id:
+            raise ValueError(f"无法从 URL 提取演出 ID: {self._event_url}")
+
+        if not self._accounts_config:
+            raise ValueError("请先在登录页登录至少一个账号，再加载演出信息")
+
+        self.status_update.emit("正在恢复登录账号...")
+        auth_manager = AuthManager(data_dir=self._data_dir)
+        primary = self._accounts_config[0]
+        nickname = primary.get("nickname", "")
+        cookie_string = primary.get("cookie_string", "")
+
+        if cookie_string:
+            account = await auth_manager.login_by_cookie(cookie_string, nickname=nickname)
+        else:
+            account = await auth_manager.login_by_saved_cookie(nickname)
+
+        try:
+            self.status_update.emit("正在加载演出详情...")
+            client = MtopClient(account.session)
+            detail = await fetch_event_detail(client, item_id)
+            self.load_success.emit(detail)
+        finally:
+            await account.session.aclose()
+
+
 class TicketWorker(QThread):
     """
     抢票工作线程。
-    完整流程：NTP同步 -> 会话预热 -> 定时等待 -> 监控 -> 并发下单 -> 通知
+    执行流程：NTP 同步 -> 会话预热 -> 定时等待 -> 监控 -> 并发下单。
     """
 
     status_update = Signal(str)
@@ -112,7 +171,7 @@ class TicketWorker(QThread):
         try:
             loop.run_until_complete(self._main())
         except Exception as error:
-            self.order_failed.emit(f"任务异常: {error}")
+            self.order_failed.emit(f"运行异常: {error}")
         finally:
             loop.close()
 
@@ -124,7 +183,7 @@ class TicketWorker(QThread):
         event_url = target_cfg.get("event_url", "")
         item_id = extract_item_id(event_url)
         if not item_id:
-            self.order_failed.emit(f"无法从 URL 中提取演出ID: {event_url}")
+            self.order_failed.emit(f"无法从 URL 提取演出 ID: {event_url}")
             return
 
         self.status_update.emit("正在同步时间...")
@@ -168,7 +227,7 @@ class TicketWorker(QThread):
                         warmup = SessionWarmup(client, item_id)
                         await warmup.warmup(warmup_duration)
 
-            self.status_update.emit("等待开售时间...")
+            self.status_update.emit("等待开抢时间...")
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 sleep_until,
@@ -176,7 +235,7 @@ class TicketWorker(QThread):
                 2.0,
             )
 
-        self.status_update.emit("监控中，等待开票...")
+        self.status_update.emit("开始监控余票...")
         first_client = pool.get_client(pool.active_accounts[0].nickname)
         monitor = TicketMonitor(
             client=first_client,
@@ -190,14 +249,14 @@ class TicketWorker(QThread):
         try:
             ticket_event = await monitor.watch()
         except asyncio.CancelledError:
-            self.status_update.emit("监控已停止")
+            self.status_update.emit("任务已停止")
             return
 
         self.status_update.emit(
             f"发现票档: {ticket_event.session_name} - {ticket_event.tier_name}"
         )
 
-        self.status_update.emit("正在抢票...")
+        self.status_update.emit("正在提交订单...")
         buyers_raw = target_cfg.get("buyers", [])
         buyers = []
         for buyer in buyers_raw:
@@ -226,7 +285,7 @@ class TicketWorker(QThread):
             self.order_success.emit(
                 {"order_id": result.order_id, "message": result.message}
             )
-            self.status_update.emit(f"抢票成功！订单号: {result.order_id}")
+            self.status_update.emit(f"抢票成功，订单号: {result.order_id}")
         else:
             message = result.message if result else "未知错误"
             self.order_failed.emit(message)

@@ -1,17 +1,33 @@
-"""任务配置标签页"""
+"""任务配置标签页。"""
+from __future__ import annotations
+
+import time
+
+from PySide6.QtCore import QDateTime, Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QSpinBox, QGroupBox, QListWidget,
-    QListWidgetItem, QDateTimeEdit, QCheckBox, QTextEdit, QMessageBox,
+    QCheckBox,
+    QDateTimeEdit,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, Signal, QDateTime
-from PySide6.QtGui import QFont
 
 
 class TaskTab(QWidget):
-    """任务配置标签页"""
-    start_requested = Signal(dict)   # 任务配置 dict
+    """任务配置标签页。"""
+
+    start_requested = Signal(dict)
     stop_requested = Signal()
+    detail_load_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -22,8 +38,7 @@ class TaskTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
-        # 演出配置
-        event_group = QGroupBox("演出配置")
+        event_group = QGroupBox("演出信息")
         event_layout = QVBoxLayout(event_group)
 
         url_row = QHBoxLayout()
@@ -31,23 +46,30 @@ class TaskTab(QWidget):
         self._url_input = QLineEdit()
         self._url_input.setPlaceholderText("https://detail.damai.cn/item.htm?id=xxx")
         url_row.addWidget(self._url_input)
+
+        self._load_btn = QPushButton("加载数据")
+        self._load_btn.setFixedWidth(100)
+        self._load_btn.clicked.connect(self._on_load_detail)
+        url_row.addWidget(self._load_btn)
         event_layout.addLayout(url_row)
 
-        # 场次（多行输入，每行一个）
-        event_layout.addWidget(QLabel("目标场次（每行一个，空=任意场次）:"))
-        self._sessions_input = QTextEdit()
-        self._sessions_input.setPlaceholderText("2025-01-01 上海\n2025-01-02 上海")
-        self._sessions_input.setMaximumHeight(70)
-        event_layout.addWidget(self._sessions_input)
+        self._event_info = QLabel("未加载演出信息")
+        self._event_info.setWordWrap(True)
+        self._event_info.setStyleSheet(
+            "background: #fafafa; border: 1px solid #f0f0f0; padding: 8px;"
+        )
+        event_layout.addWidget(self._event_info)
 
-        # 票档（多行输入，按优先级）
-        event_layout.addWidget(QLabel("目标票档（按优先级排序，每行一个，空=任意票档）:"))
-        self._tiers_input = QTextEdit()
-        self._tiers_input.setPlaceholderText("内场站票\nVIP座票\n普通座票")
-        self._tiers_input.setMaximumHeight(70)
-        event_layout.addWidget(self._tiers_input)
+        event_layout.addWidget(QLabel("场次筛选（可多选，不勾选则默认全部场次）:"))
+        self._sessions_list = QListWidget()
+        self._sessions_list.setMaximumHeight(110)
+        event_layout.addWidget(self._sessions_list)
 
-        # 票数
+        event_layout.addWidget(QLabel("票档筛选（可多选，不勾选则默认全部票档）:"))
+        self._tiers_list = QListWidget()
+        self._tiers_list.setMaximumHeight(130)
+        event_layout.addWidget(self._tiers_list)
+
         count_row = QHBoxLayout()
         count_row.addWidget(QLabel("购票数量:"))
         self._count_spin = QSpinBox()
@@ -59,15 +81,14 @@ class TaskTab(QWidget):
 
         layout.addWidget(event_group)
 
-        # 定时配置
-        timing_group = QGroupBox("定时配置")
+        timing_group = QGroupBox("定时设置")
         timing_layout = QVBoxLayout(timing_group)
 
-        self._use_timer = QCheckBox("定时抢票（到达开售时间前自动等待）")
+        self._use_timer = QCheckBox("定时抢票（在开票时间前自动等待）")
         timing_layout.addWidget(self._use_timer)
 
         timer_row = QHBoxLayout()
-        timer_row.addWidget(QLabel("开售时间:"))
+        timer_row.addWidget(QLabel("开抢时间:"))
         self._sale_time = QDateTimeEdit()
         self._sale_time.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self._sale_time.setDateTime(QDateTime.currentDateTime())
@@ -79,12 +100,20 @@ class TaskTab(QWidget):
 
         layout.addWidget(timing_group)
 
-        # 状态显示
         self._status_label = QLabel("就绪")
         self._status_label.setStyleSheet("color: #333; font-size: 13px; padding: 4px;")
         layout.addWidget(self._status_label)
 
-        # 操作按钮
+        task_log_group = QGroupBox("任务日志")
+        task_log_layout = QVBoxLayout(task_log_group)
+        self._task_log = QPlainTextEdit()
+        self._task_log.setReadOnly(True)
+        self._task_log.setMaximumBlockCount(800)
+        self._task_log.setMinimumHeight(180)
+        self._task_log.setStyleSheet("background: #1f1f1f; color: #d9d9d9;")
+        task_log_layout.addWidget(self._task_log)
+        layout.addWidget(task_log_group)
+
         btn_row = QHBoxLayout()
         self._start_btn = QPushButton("开始抢票")
         self._start_btn.setFixedHeight(36)
@@ -117,22 +146,11 @@ class TaskTab(QWidget):
             QMessageBox.warning(self, "提示", "请输入演出 URL")
             return
 
-        sessions = [
-            s.strip()
-            for s in self._sessions_input.toPlainText().splitlines()
-            if s.strip()
-        ]
-        tiers = [
-            t.strip()
-            for t in self._tiers_input.toPlainText().splitlines()
-            if t.strip()
-        ]
-
         config = {
             "target": {
                 "event_url": url,
-                "sessions": sessions,
-                "tiers": tiers,
+                "sessions": self._collect_checked_values(self._sessions_list),
+                "tiers": self._collect_checked_values(self._tiers_list),
                 "ticket_count": self._count_spin.value(),
                 "buyers": [],
             },
@@ -152,6 +170,70 @@ class TaskTab(QWidget):
 
     def _on_stop(self):
         self.stop_requested.emit()
+
+    def _on_load_detail(self):
+        url = self._url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "提示", "请先输入演出 URL")
+            return
+        self.detail_load_requested.emit(url)
+
+    @staticmethod
+    def _collect_checked_values(widget: QListWidget) -> list[str]:
+        values: list[str] = []
+        for index in range(widget.count()):
+            item = widget.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                values.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        return values
+
+    def _populate_check_list(
+        self,
+        widget: QListWidget,
+        items: list[dict],
+        default_checked: bool = False,
+    ):
+        widget.clear()
+        for entry in items:
+            text = entry.get("label") or entry.get("name") or "未命名"
+            value = entry.get("name") or text
+            item = QListWidgetItem(text)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if default_checked else Qt.CheckState.Unchecked
+            )
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            widget.addItem(item)
+
+    def set_event_detail(self, detail: dict):
+        title = detail.get("title", "")
+        status = detail.get("status", "") or "未知"
+        venue = detail.get("venue", "") or "未知"
+        city = detail.get("city", "") or "未知"
+        item_id = detail.get("item_id", "")
+        session_count = detail.get("session_count", 0)
+        tier_count = detail.get("tier_count", 0)
+
+        self._event_info.setText(
+            f"演出：{title}\n"
+            f"状态：{status}\n"
+            f"城市：{city}\n"
+            f"场馆：{venue}\n"
+            f"项目 ID：{item_id}\n"
+            f"场次数：{session_count} | 票档数：{tier_count}"
+        )
+        self._populate_check_list(self._sessions_list, detail.get("sessions", []))
+        self._populate_check_list(self._tiers_list, detail.get("tiers", []))
+
+    def set_loading(self, loading: bool):
+        self._load_btn.setEnabled(not loading)
+
+    def append_log(self, level: str, message: str):
+        ts = time.strftime("%H:%M:%S")
+        self._task_log.appendPlainText(f"[{ts}] [{level}] {message}")
+
+    def clear_logs(self):
+        self._task_log.clear()
 
     def set_running(self, running: bool):
         self._running = running

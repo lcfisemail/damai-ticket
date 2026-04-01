@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: damai-ticket
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: httpx[http2]>=0.28
+Requires-Dist: PySide6>=6.6
+Requires-Dist: loguru>=0.7
+Requires-Dist: tomli-w>=1.0
+Requires-Dist: aiosmtplib>=3.0
+Requires-Dist: ntplib>=0.4
+Requires-Dist: cryptography>=42.0
